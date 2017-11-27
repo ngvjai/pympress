@@ -734,9 +734,9 @@ class UI(builder.Builder):
         # use a surface from the cache if possible.
         name = widget.get_name()
         nb = page.number()
-        pb = self.cache.get(name, nb)
         wtype = self.cache.get_widget_type(name)
         ww, wh = widget.get_allocated_width(), widget.get_allocated_height()
+        pb = self.cache.get(name, nb, ww, wh, wtype)
 
         if pb is None:
             if self.resize_panes and widget in [self.p_da_next, self.p_da_cur, self.p_da_notes]:
@@ -749,7 +749,7 @@ class UI(builder.Builder):
             cairo_prerender = cairo.Context(pb)
             page.render_cairo(cairo_prerender, ww, wh, wtype)
 
-            self.cache.set(name, nb, pb)
+            self.cache.set(name, nb, ww, wh, wtype, pb)
 
             cairo_context.set_source_surface(pb, 0, 0)
             cairo_context.paint()
@@ -1176,6 +1176,7 @@ class UI(builder.Builder):
         self.pres_blank.set_active(self.blanked)
 
         return True
+
 
     def switch_mode(self, widget, event = None):
         """ Switch the display mode to "Notes mode" or "Normal mode" (without notes).

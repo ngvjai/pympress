@@ -81,7 +81,7 @@ class SurfaceCache(object):
     #: or :const:`~pympress.ui.PDF_NOTES_PAGE`).
     surface_type = {}
 
-    #: Dictionary of :class:`~threading.Lock` used for managing conccurent
+    #: Dictionary of :class:`~threading.RLock` used for managing conccurent
     #: accesses to :attr:`surface_cache`, :attr:`surface_size`, and :attr:`jobs`.
     locks = {}
 
@@ -115,10 +115,10 @@ class SurfaceCache(object):
             wtype (`int`):  type of document handled by the widget (see :attr:`surface_type`)
             start_enabled (`bool`):  whether this widget is initially in the list of widgets to prerender
         """
-        self.surface_cache[widget_name] = OrderedDict()
+        self.surface_cache[widget_name] = {}
         self.surface_size[widget_name] = (-1, -1)
         self.surface_type[widget_name] = wtype
-        self.locks[widget_name] = threading.Lock()
+        self.locks[widget_name] = threading.RLock()
         if start_enabled:
             self.enable_prerender(widget_name)
 
@@ -136,8 +136,7 @@ class SurfaceCache(object):
             self.doc = new_doc
 
         for widget_name in self.locks:
-            with self.locks[widget_name]:
-                self.surface_cache[widget_name].clear()
+            self.surface_cache[widget_name].clear()
 
 
     def disable_prerender(self, widget_name):
@@ -165,10 +164,7 @@ class SurfaceCache(object):
             widget_name (`str`):  string used to identify a widget
             wtype (`int`):  type of document handled by the widget (see :attr:`surface_type`)
         """
-        with self.locks[widget_name]:
-            if self.surface_type[widget_name] != wtype :
-                self.surface_type[widget_name] = wtype
-                self.surface_cache[widget_name].clear()
+        self._reconf_widget(widget_name, *self.surface_size[widget_name], wtype)
 
 
     def get_widget_type(self, widget_name):
@@ -183,6 +179,25 @@ class SurfaceCache(object):
         return self.surface_type[widget_name]
 
 
+    def _reconf_widget(self, widget_name, width, height, wtype):
+        """ Change the size of a registered widget, thus invalidating all the cached pages.
+
+        Args:
+            widget_name (`str`):  name of the widget that is resized
+            width (`int`):  new width of the widget
+            height (`int`):  new height of the widget
+            wtype (`int`):  type of document handled by the widget (see :attr:`surface_type`)
+        """
+        with self.locks[widget_name]:
+            if (width, height) != self.surface_size[widget_name] or wtype != self.surface_type[widget_name]:
+                self.surface_cache[widget_name].clear()
+
+                self.surface_size[widget_name] = (width, height)
+                self.surface_type[widget_name] = wtype
+
+                self.surface_cache[widget_name][(width, height, wtype)] = OrderedDict()
+
+
     def resize_widget(self, widget_name, width, height):
         """ Change the size of a registered widget, thus invalidating all the cached pages.
 
@@ -191,24 +206,31 @@ class SurfaceCache(object):
             width (`int`):  new width of the widget
             height (`int`):  new height of the widget
         """
-        with self.locks[widget_name]:
-            if (width, height) != self.surface_size[widget_name]:
-                self.surface_cache[widget_name].clear()
-                self.surface_size[widget_name] = (width, height)
+        self._reconf_widget(widget_name, width, height, self.surface_type[widget_name])
 
 
-    def get(self, widget_name, page_nb):
+    def get(self, widget_name, page_nb, ww, wh, wtype):
         """ Fetch a cached, prerendered page for the specified widget.
 
         Args:
             widget_name (`str`):  name of the concerned widget
             page_nb (`int`):  number of the page to fetch in the cache
+            ww (`int`):  widget width
+            wh (`int`):  widget height
+            wtype (`int`):  type of document handled by the widget (see :attr:`surface_type`)
 
         Returns:
             :class:`~cairo.ImageSurface`: the cached page if available, or `None` otherwise
         """
         with self.locks[widget_name]:
-            pc = self.surface_cache[widget_name]
+            try:
+                pc = self.surface_cache[widget_name][(ww, wh, wtype)]
+            except KeyError:
+                logger.error('Configuration {}-{} not found in widget cache!'.format(widget_name, (ww, wh, wtype)))
+
+                self._reconf_widget(widget_name, ww, wh, wtype)
+                return None
+
             if page_nb in pc:
                 pc.move_to_end(page_nb)
                 return pc[page_nb]
@@ -216,16 +238,26 @@ class SurfaceCache(object):
                 return None
 
 
-    def set(self, widget_name, page_nb, val):
+    def set(self, widget_name, page_nb, ww, wh, wtype, val):
         """ Store a rendered page in the cache.
 
         Args:
             widget_name (`str`):  name of the concerned widget
             page_nb (`int`):  number of the page to store in the cache
+            ww (`int`):  widget width
+            wh (`int`):  widget height
+            wtype (`int`):  type of document handled by the widget (see :attr:`surface_type`)
             val (:class:`~cairo.ImageSurface`):  content to store in the cache
         """
         with self.locks[widget_name]:
-            pc = self.surface_cache[widget_name]
+            try:
+                pc = self.surface_cache[widget_name][(ww, wh, wtype)]
+            except KeyError:
+                logger.error('Configuration {}-{} not found in widget cache!'.format(widget_name, (ww, wh, wtype)))
+
+                self._reconf_widget(widget_name, ww, wh, wtype)
+                pc = self.surface_cache[widget_name][(ww, wh, wtype)]
+
             pc[page_nb] = val
             pc.move_to_end(page_nb)
 
@@ -262,15 +294,21 @@ class SurfaceCache(object):
         """
 
         with self.locks[widget_name]:
-            if page_nb in self.surface_cache[widget_name]:
-                # Already in cache
-                return False
             ww, wh = self.surface_size[widget_name]
             wtype = self.surface_type[widget_name]
 
+            if (ww, wh, wtype) not in self.surface_cache[widget_name]:
+                logger.error('Missing configuration {}-{} in widget cache!'.format(widget_name, (ww, wh, wtype)))
+                self._reconf_widget(widget_name, ww, wh, wtype)
+
+            elif page_nb in self.surface_cache[widget_name][(ww, wh, wtype)]:
+                # Already in cache
+                logger.debug('Found page {} for configuration {}-{} in cache, not re-rendering'.format(page_nb, widget_name, (ww, wh, wtype)))
+                return False
+
         if ww < 0 or wh < 0:
-            logger.warning('Widget {} with invalid size {}x{} when rendering'.format(widget_name, ww, wh))
-            return
+            logger.warning('Invalid size {}x{} when rendering {}'.format(ww, wh, widget_name))
+            return False
 
         with self.doc_lock:
             page = self.doc.page(page_nb)
@@ -286,10 +324,19 @@ class SurfaceCache(object):
 
         # Save if possible and necessary
         with self.locks[widget_name]:
-            pc = self.surface_cache[widget_name]
-            if (ww, wh) == self.surface_size[widget_name] and not page_nb in pc:
-                pc[page_nb] = surface
-                pc.move_to_end(page_nb)
+            try:
+                pc = self.surface_cache[widget_name][(ww, wh, wtype)]
+            except KeyError:
+                if (ww, wh) != self.surface_size[widget_name] or wtype != self.surface_type[widget_name]:
+                    logger.info('Change of configuration during rendering, can not save page {} for {}: {} but now {}'.format(page_nb, widget_name, (ww, wh, wtype), self.surface_size[widget_name] + (self.surface_type[widget_name],)), exc_info = True)
+                    return False
+                else:
+                    logger.error('Configuration {}-{} disappeared from widget cache!'.format(widget_name, (ww, wh, wtype)), exc_info = True)
+                    self.resize_widget(widget_name, ww, wh)
+                    pc = self.surface_cache[(widget_name, ww, wh)]
+
+            pc[page_nb] = surface
+            pc.move_to_end(page_nb)
 
             while len(pc) > self.max_pages:
                 pc.popitem(False)

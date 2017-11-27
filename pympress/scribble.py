@@ -195,7 +195,7 @@ class Scribbler(builder.Builder):
             page = self.get_current_page()
             wtype = PDF_CONTENT_PAGE if self.get_notes_mode() else PDF_REGULAR
             nb = page.number()
-            pb = self.cache.get("scribble_p_da", nb)
+            pb = self.cache.get("scribble_p_da", nb, ww, wh, wtype)
 
             if pb is None:
                 # Cache miss: render the page, and save it to the cache
@@ -207,7 +207,7 @@ class Scribbler(builder.Builder):
                 cairo_context.set_source_surface(pb, 0, 0)
                 cairo_context.paint()
 
-                self.cache.set("scribble_p_da", nb, pb)
+                self.cache.set("scribble_p_da", nb, ww, wh, wtype, pb)
             else:
                 # Cache hit: draw the surface from the cache to the widget
                 cairo_context.set_source_surface(pb, 0, 0)
